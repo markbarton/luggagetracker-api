@@ -1,0 +1,2 @@
+node scripts/increment-version.js
+git add src/version.ts

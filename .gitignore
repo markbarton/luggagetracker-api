@@ -1,0 +1,14 @@
+node_modules
+dist
+.history
+
+# Env — keep .env.example tracked, ignore everything else
+.env
+.env.*
+!.env.example
+
+# macOS
+.DS_Store
+
+# Backups produced by scripts/deploy.js
+backups/

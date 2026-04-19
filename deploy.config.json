@@ -1,0 +1,38 @@
+{
+    "branches": {
+        "main": "production",
+        "master": "production",
+        "develop": "staging"
+    },
+    "build": {
+        "command": "npm run build"
+    },
+    "servers": {
+        "production": {
+            "host": "135.181.180.176",
+            "port": 22,
+            "username": "mark",
+            "remotePath": "/var/www/land-registry-api",
+            "privateKeyPath": "~/.ssh/shinydesign",
+            "pm2Name": "land-registry-api",
+            "nodeEnv": "production"
+        }
+    },
+    "exclude": [
+        "node_modules",
+        ".git",
+        ".env",
+        "src",
+        "deploy.config.json",
+        "tsconfig.json",
+        ".DS_Store",
+        "*.log",
+        "*.tsbuildinfo"
+    ],
+    "postDeploy": {
+        "commands": [
+            "source ~/.nvm/nvm.sh && cd {remotePath} && npm install --production",
+            "source ~/.nvm/nvm.sh && pm2 restart {pm2Name} || pm2 start {remotePath}/dist/index.js --name {pm2Name} --env {nodeEnv}"
+        ]
+    }
+}
