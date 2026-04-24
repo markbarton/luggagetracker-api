@@ -34,6 +34,16 @@ App-owned vars use the `CUSTOM_` prefix. Logged automatically at startup by `src
 | `CUSTOM_PORT` | HTTP port |
 | `CUSTOM_MONGO_CONNECTION` | Mongo connection string |
 | `NODE_ENV` | `local` / `development` / `production` — drives logger config |
+| `CUSTOM_JWT_SECRET` | JWT signing secret (≥32 chars; generate with `openssl rand -hex 32`) |
+| `CUSTOM_JWT_WEB_ACCESS_TTL` | Web access token lifetime (default `15m`) |
+| `CUSTOM_JWT_WEB_REFRESH_TTL` | Web refresh token lifetime (default `30d`) |
+| `CUSTOM_JWT_MOBILE_ACCESS_TTL` | Mobile access token lifetime (default `365d`) |
+| `CUSTOM_BCRYPT_ROUNDS` | bcrypt work factor, 4–15 (default `12`) |
+| `CUSTOM_WEB_BASE_URL` | Base URL of the web UI — used inside email links |
+| `CUSTOM_SMTP_HOST` / `_PORT` / `_SECURE` / `_USER` / `_PASS` / `_FROM` | SMTP provider settings for nodemailer |
+| `CUSTOM_EMAIL_TOKEN_PASSWORD_RESET_TTL` | Password-reset link lifetime (default `1h`) |
+| `CUSTOM_EMAIL_TOKEN_EMAIL_VERIFY_TTL` | Verify-email link lifetime (default `24h`) |
+| `CUSTOM_EMAIL_TOKEN_MAGIC_LINK_TTL` | Magic-link lifetime (default `15m`) |
 
 ## Project layout
 
@@ -52,20 +62,97 @@ scripts/
 
 See [CLAUDE.md](./CLAUDE.md) for the full slice pattern.
 
+## Authentication & access control
+
+### Identities
+
+Three levels, all stored in `users`:
+
+- **systemAdmin** — `isSystemAdmin: true`. Bypasses all checks. Not tied to a client.
+- **clientAdmin** — has `'clientAdmin'` in `roles`. Scoped to their own `clientId`. Can manage users and trips for that client.
+- **user** — plain role. Can see themselves and any trip in their `tripIds`.
+
+### Platform / access mode
+
+`user.accessMode` is one of:
+
+| Value | Behaviour |
+| --- | --- |
+| `web` | 15m access token + 30d refresh token. Refresh rotates both. |
+| `mobile` | Single 365d access token. **No refresh.** Designed for offline-first usage — device lock is the practical gate, server revocation kicks in when the app next syncs. |
+| `both` | Platform is chosen at login time via the `platform` field. |
+
+The platform is validated server-side against `accessMode` — clients cannot upgrade themselves to a long-lived mobile token.
+
+### Bootstrap
+
+Create the first system admin from the CLI:
+
+```bash
+npx ts-node src/scripts/createSystemAdmin.ts admin@example.com StrongPassw0rd "First" "Last"
+```
+
+Once that exists, log in as them and create clients + client admins via the API.
+
+### Sessions & revocation
+
+Every JWT has a matching row in `sessions` (includes `userId`, `platform`, `kind`, `expiresAt`). Revocation is server-side — `authenticate` middleware rejects a token if its session is `revokedAt` or expired. Endpoints: `GET /auth/sessions` (list your own), `POST /auth/sessions/:id/revoke`. Password reset revokes **all** of a user's sessions.
+
 ## Example endpoints
 
-The `land-registry-documents` slice is a worked CRUD example to copy when adding new resources.
+### Auth
 
-| Method | Path | Notes |
+| Method | Path | Auth | Notes |
+| --- | --- | --- | --- |
+| `POST` | `/auth/login` | — | Body: `{ email, password, platform: 'web'\|'mobile', deviceLabel? }`. Returns `{ accessToken, refreshToken?, user }`. `refreshToken` only for web. |
+| `POST` | `/auth/refresh` | — | Body: `{ refreshToken }`. Web only. Rotates the pair; old refresh is invalidated. |
+| `POST` | `/auth/logout` | bearer | Revokes the current session. Optional `{ refreshToken }` in body also revoked. |
+| `GET` | `/auth/me` | bearer | Current user profile. |
+| `GET` | `/auth/sessions` | bearer | List the current user's active sessions. |
+| `POST` | `/auth/sessions/:id/revoke` | bearer | Revoke a specific session. Self or systemAdmin. |
+| `POST` | `/auth/password-reset/request` | — | Body: `{ email }`. Always returns 204. |
+| `POST` | `/auth/password-reset/confirm` | — | Body: `{ token, newPassword }`. Revokes all user sessions on success. |
+| `POST` | `/auth/email-verify/send` | bearer | Sends a verification link to the current user. 204 if already verified. |
+| `POST` | `/auth/email-verify/confirm` | — | Body: `{ token }`. Marks user verified. |
+| `POST` | `/auth/magic-link/request` | — | Body: `{ email }`. Web-only (rejected silently for mobile-only users). Always 204. |
+| `POST` | `/auth/magic-link/confirm` | — | Body: `{ token }`. Returns `{ accessToken, refreshToken, user }` like a normal web login. |
+
+Send authenticated requests as `Authorization: Bearer <accessToken>`.
+
+### Email click-through flow
+
+Email links point to the **web UI**, not the API:
+
+```
+${CUSTOM_WEB_BASE_URL}/reset-password?token=...
+${CUSTOM_WEB_BASE_URL}/verify-email?token=...
+${CUSTOM_WEB_BASE_URL}/magic-link?token=...
+```
+
+The web app renders its own UI for each, reads `token` from the query string, and POSTs it to the matching `/auth/*/confirm` endpoint.
+
+Tokens are 32 random bytes hex-encoded, stored only as a SHA-256 hash, single-use, and expire per the `CUSTOM_EMAIL_TOKEN_*_TTL` env vars. Request endpoints never reveal whether an email is registered.
+
+### Resources
+
+| Method | Path | Who can hit it |
 | --- | --- | --- |
-| `GET` | `/health` | Liveness + Mongo ping |
-| `GET` | `/land-registry-documents` | Paginated list. Query: `page`, `pageSize` (max 100), `titleNumber` (prefix match) |
-| `GET` | `/land-registry-documents/:id` | Single document |
-| `POST` | `/land-registry-documents` | Create. Body: `titleNumber`, `address`, `tenure`, optional `pricePaid`, `transferDate` |
-| `PUT` | `/land-registry-documents/:id` | Replace |
-| `DELETE` | `/land-registry-documents/:id` | 204 on success |
+| `GET` `POST` `PUT` `DELETE` | `/clients[/:id]` | systemAdmin only |
+| `GET` | `/users` | systemAdmin sees all; clientAdmin sees own client; user sees own client (filtered by data layer) |
+| `GET` | `/users/:id` | systemAdmin; clientAdmin for same-client user; self |
+| `POST` | `/users` | systemAdmin; clientAdmin (can create users in own client only, cannot create systemAdmin) |
+| `PUT` | `/users/:id` | systemAdmin; clientAdmin for same-client user |
+| `PUT` | `/users/:id/password` | Same as update, **or** self |
+| `PUT` | `/users/:id/trips` | systemAdmin; clientAdmin for same-client user. Body: `{ tripIds: string[] }` |
+| `DELETE` | `/users/:id` | Soft-delete. Same as update. |
+| `GET` | `/trips` | systemAdmin all; clientAdmin own client; user sees only trips in their `user.tripIds` |
+| `GET` | `/trips/:id` | Same scoping as list |
+| `POST` `PUT` `DELETE` | `/trips[/:id]` | systemAdmin; clientAdmin for own client |
+| `GET` `POST` `PUT` `DELETE` | `/land-registry-documents[/:id]` | Template example — currently **unauthenticated** |
 
-List response shape:
+Delete operations on users/clients/trips are **soft** — they set `status: 'deleted'` and are excluded from normal queries.
+
+### List response shape
 
 ```json
 {

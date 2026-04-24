@@ -84,6 +84,66 @@ Use the land-registry slice as the canonical example — copy its shape when add
 - Default DB (from connection string) is available via `returnDB()`. For a named DB, use `returnClient().db('<name>')` — our slice does this.
 - Never create a new `MongoClient` in a handler or data module.
 
+## Auth & security
+
+Every endpoint except `/health`, `/auth/login`, `/auth/refresh`, `/auth/password-reset/*`, `/auth/magic-link/*`, `/auth/email-verify/confirm` requires authentication.
+
+### Identities
+- **systemAdmin** — `user.isSystemAdmin = true`, `clientId = null`. Bypasses all client/role checks.
+- **clientAdmin** — `user.roles` contains `'clientAdmin'`. Scoped to own `clientId`.
+- **user** — plain role. Sees only self + trips listed in `user.tripIds`.
+
+### Access mode
+`user.accessMode ∈ {'mobile', 'web', 'both'}` controls which platform the user can log in from. Enforced in `login` against the `platform` body field — not negotiable by the client. Mobile users get a 365d access token (no refresh, offline-first). Web users get 15m access + 30d refresh (rotated on refresh).
+
+### Middleware
+- `authenticate` (`src/middleware/authenticate.ts`) — verifies JWT signature, looks up session by `sid` (rejects if revoked/expired), loads user, populates `req.user`.
+- `requireSystemAdmin`, `requireClientAdminOrSystemAdmin`, `requireAuthenticated` (`src/middleware/authorize.ts`).
+- `canAccessClient(req.user, clientId)` and `scopeClientId(req.user)` — use these inside controllers when filtering list queries or checking write targets.
+
+### When writing a new slice that belongs to a client
+
+1. Mount the route with `router.use(authenticate)`.
+2. In list handlers: read `scopeClientId(req.user)` and force that as the `clientId` filter unless the caller is sysadmin. If the query supplies a different `clientId` than the user can see → 403.
+3. In get/update/delete handlers: load the target first, then `canAccessClient(req.user, target.clientId)` before acting.
+4. Never trust a `clientId` from the request body for write scoping — always cross-check against `req.user`.
+
+### Sessions
+- Every issued JWT has a matching row in `sessions` (`src/data/sessions.ts`).
+- Revocation is server-side: flip `revokedAt`. TTL index on `expiresAt` auto-cleans expired rows.
+- After a password reset → `sessions.revokeAllForUser(userId)` (forces re-login everywhere).
+
+### Email flows (password reset, email verify, magic link)
+
+All three use the same pattern in `emailTokens`:
+- One collection, `purpose` discriminator (`'passwordReset' | 'emailVerify' | 'magicLink'`).
+- Token sent to user is 32 random bytes hex-encoded; only SHA-256 hash is persisted (`src/utils/emailTokenCrypto.ts`).
+- TTL index on `expiresAt` auto-expires unused tokens.
+- Single-use — mark `usedAt` on confirm.
+
+Link format points to the **web UI**, not the API: `${CUSTOM_WEB_BASE_URL}/<path>?token=…`. The UI extracts the token and POSTs it to the matching confirm endpoint. Don't change this without discussion — it decouples API from UI routing.
+
+Request endpoints (`/password-reset/request`, `/magic-link/request`) always return 204 regardless of whether the email exists, to prevent user enumeration. Log at `debug` level when no user matches.
+
+Magic link is web-only: reject if `user.accessMode === 'mobile'`.
+
+### Adding a new email
+
+1. Add MJML template in `src/emails/<name>.ts` using `layoutMjml(...)` from `src/emails/layout.ts`. Always produce both `html` and `text` — some providers downgrade.
+2. Always pass user input through `escapeHtml` before embedding in MJML.
+3. Wire the send call in the controller using `sendEmail({ to, subject, html, text })` from `src/utils/mailer.ts`.
+4. If it's a click-through flow, store a token via `emailTokens.create(...)` and build the URL with `webBaseUrl()`.
+
+### What not to do (auth)
+
+- Don't add endpoints without `authenticate` unless they're genuinely public (login, reset request, magic link request).
+- Don't read `user.clientId` from the request body to scope a query — read it from `req.user`.
+- Don't trust `platform` from the login body without checking `user.accessMode`.
+- Don't skip the `sessions.findActiveById` check in `authenticate` — JWT signature alone is not sufficient (we need server-side revocation).
+- Don't store raw email tokens — always hash with `hashEmailToken`.
+- Don't reveal user existence in password-reset or magic-link request responses.
+- Don't issue mobile tokens from the magic link flow.
+
 ## Adding a new slice
 
 1. Create the four files (`types/`, `data/`, `controllers/`, `routes/`).

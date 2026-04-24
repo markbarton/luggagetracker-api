@@ -1,11 +1,12 @@
 import { Request, Response } from 'express'
-import { ZodError } from 'zod'
 import logger from '../logger'
 import * as documents from '../data/landRegistryDocuments'
 import {
   landRegistryDocumentInputSchema,
   listQuerySchema
 } from '../types/landRegistryDocument'
+import { handleError } from '../utils/handleError'
+import { formatZodError } from '../utils/formatZodError'
 
 export async function listDocuments(req: Request, res: Response): Promise<Response> {
   try {
@@ -104,13 +105,3 @@ export async function deleteDocument(req: Request, res: Response): Promise<Respo
   }
 }
 
-function formatZodError(err: ZodError): string {
-  return err.issues
-    .map(i => (i.path.length ? `${i.path.join('.')}: ${i.message}` : i.message))
-    .join('; ')
-}
-
-function handleError(res: Response, err: unknown, context: string): Response {
-  logger.error(`${context} failed: ${err instanceof Error ? err.message : String(err)}`)
-  return res.status(500).json({ error: 'Internal server error' })
-}

@@ -4,6 +4,7 @@ import {
   LandRegistryDocument,
   LandRegistryDocumentInput
 } from '../types/landRegistryDocument'
+import { escapeRegex } from '../utils/escapeRegex'
 
 const DB_NAME = 'land-registry'
 const COLLECTION_NAME = 'landregistrydocuments'
@@ -76,8 +77,4 @@ export async function remove(id: string): Promise<boolean> {
   if (!ObjectId.isValid(id)) return false
   const result = await collection().deleteOne({ _id: new ObjectId(id) })
   return result.deletedCount === 1
-}
-
-function escapeRegex(input: string): string {
-  return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
